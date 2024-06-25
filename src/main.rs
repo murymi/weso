@@ -36,7 +36,7 @@ fn main() {
                         let stream = unsafe { TcpStream::from_raw_fd(fd) };
                         let frame = read_frame(&stream);
 
-                        let mut reader = BufReader::new(WsStream::new(frame, stream));
+                        let mut reader = BufReader::new(WsStream::new(frame, &stream));
 
                         match frame.opcode {
                             Opcode::Continuation => {}
@@ -58,26 +58,26 @@ fn main() {
                                     .expect("filed to read from reader");
                                 let status_code = u16::from_be_bytes(buf);
                                 let frame = Frame::new(true, Opcode::Close, None, 2);
-                                let mut stream =
-                                    WsStream::new(frame, unsafe { TcpStream::from_raw_fd(fd) });
-                                stream.write(&u16::to_be_bytes(status_code)).unwrap();
+                                let mut wstream = WsStream::new(frame, &stream);
+                                wstream.write(&u16::to_be_bytes(status_code)).unwrap();
                                 mux.remove_pfd(fd);
+                                mem::drop(stream);
+                                continue;
                             }
                             Opcode::Ping => {
                                 let mut buf: Vec<u8> = vec![];
                                 let n =
                                     reader.read_to_end(&mut buf).expect("failed to read to end");
                                 let pong = Frame::new(true, Opcode::Pong, None, n);
-                                let stream = unsafe { TcpStream::from_raw_fd(fd) };
-                                let mut stream = WsStream::new(frame, stream);
+                                let mut stream = WsStream::new(pong, &stream);
                                 stream.write(&buf[0..n]).unwrap();
-                                mem::forget(stream);
                             }
                             Opcode::Pong => {
                                 continue;
                             }
                         }
-                        exit(0)
+
+                        mem::forget(stream);
                     }
                 }
             }
@@ -273,15 +273,15 @@ fn get_key(stream: &mut TcpStream) -> String {
     key.unwrap()
 }
 
-struct WsStream {
+struct WsStream<'a> {
     frame: Frame,
-    stream: TcpStream,
+    stream: &'a TcpStream,
     buffer: Vec<u8>,
     cursor: usize,
 }
 
-impl WsStream {
-    fn new(frame: Frame, stream: TcpStream) -> Self {
+impl<'a> WsStream<'a> {
+    fn new(frame: Frame, stream: &'a TcpStream) -> Self {
         Self {
             frame,
             stream,
@@ -291,7 +291,7 @@ impl WsStream {
     }
 }
 
-impl Read for WsStream {
+impl<'a> Read for WsStream<'a> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.cursor == self.frame.payload_length {
             return Ok(0);
@@ -310,7 +310,7 @@ impl Read for WsStream {
     }
 }
 
-impl Write for WsStream {
+impl<'a> Write for WsStream<'a> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         if self.cursor + buf.len() > self.frame.payload_length {
             return Err(Error::new(
