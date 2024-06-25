@@ -1,17 +1,19 @@
 use std::{
     ffi::c_int,
-    io::{BufRead, BufReader, Error, Read, Write},
+    io::{stdout, BufRead, BufReader, Error, Read, Write},
     mem,
     net::{TcpListener, TcpStream},
     os::fd::{AsRawFd, FromRawFd},
-    process::exit,
+    process::exit, thread::sleep, time::Duration,
 };
 
+use frame::{Frame, Opcode};
 use mux::Mux;
 
 mod base64;
 mod mux;
 mod sha1;
+mod frame;
 
 const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -34,28 +36,31 @@ fn main() {
                         }
                     } else {
                         let stream = unsafe { TcpStream::from_raw_fd(fd) };
-                        let frame = read_frame(&stream);
-
+                        let frame = Frame::read_frame(&stream);
                         let mut reader = BufReader::new(WsStream::new(frame, &stream));
-
                         match frame.opcode {
-                            Opcode::Continuation => {}
+                            Opcode::Continuation => {
+                                println!("continue from: {:?}", stream.peer_addr());
+                                sleep(Duration::from_secs(60));
+                            }
                             Opcode::Text => {
+                                println!("text from: {:?}", stream.peer_addr());
                                 let mut str = String::new();
                                 reader
                                     .read_to_string(&mut str)
                                     .expect("failed to read from reader");
                             }
                             Opcode::Binary => {
+                                println!("binary from: {:?}", stream.peer_addr());
                                 let mut buf: Vec<u8> = vec![];
                                 reader.read_to_end(&mut buf).expect("failed to read to end");
                             }
                             Opcode::Reserved => {}
                             Opcode::Close => {
+                                println!("close from: {:?}", stream.peer_addr());
                                 let mut buf = [0u8; 2];
                                 reader
-                                    .read_exact(&mut buf)
-                                    .expect("filed to read from reader");
+                                    .read_exact(&mut buf);
                                 let status_code = u16::from_be_bytes(buf);
                                 let frame = Frame::new(true, Opcode::Close, None, 2);
                                 let mut wstream = WsStream::new(frame, &stream);
@@ -65,6 +70,7 @@ fn main() {
                                 continue;
                             }
                             Opcode::Ping => {
+                                println!("ping from: {:?}", stream.peer_addr());
                                 let mut buf: Vec<u8> = vec![];
                                 let n =
                                     reader.read_to_end(&mut buf).expect("failed to read to end");
@@ -88,143 +94,6 @@ fn main() {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-enum Opcode {
-    Continuation,
-    Text,
-    Binary,
-    Reserved,
-    Close,
-    Ping,
-    Pong,
-}
-
-impl From<u8> for Opcode {
-    fn from(value: u8) -> Self {
-        match value {
-            0x0 => Self::Continuation,
-            0x1 => Self::Text,
-            0x2 => Self::Binary,
-            0x8 => Self::Close,
-            0x9 => Self::Ping,
-            0xa => Self::Pong,
-            _ => Self::Reserved,
-        }
-    }
-}
-
-impl Opcode {
-    fn into_u8(self) -> u8 {
-        match self {
-            Self::Continuation => 0x0,
-            Self::Text => 0x1,
-            Self::Binary => 0x2,
-            Self::Close => 0x8,
-            Self::Ping => 0x9,
-            Self::Pong => 0xa,
-            Self::Reserved => 0xb,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Frame {
-    is_final: bool,
-    opcode: Opcode,
-    mask: Option<[u8; 4]>,
-    payload_length: usize,
-}
-
-impl Frame {
-    fn new(is_final: bool, opcode: Opcode, mask: Option<[u8; 4]>, payload_length: usize) -> Self {
-        Self {
-            is_final,
-            opcode,
-            mask,
-            payload_length,
-        }
-    }
-
-    fn to_blob(&self) -> Vec<u8> {
-        let mut blob = vec![];
-        let mut first_byte = 0x0u8;
-        if self.is_final {
-            first_byte |= 0x80;
-        }
-        first_byte |= self.opcode.into_u8();
-        blob.push(first_byte);
-        let mut second_byte = 0x0u8;
-        if self.mask.is_some() {
-            second_byte |= 0x80;
-        }
-
-        if self.payload_length < 126 {
-            second_byte |= self.payload_length as u8;
-            blob.push(second_byte);
-        } else if self.payload_length <= u16::MAX as usize {
-            second_byte |= 126;
-            blob.push(second_byte);
-            let _ = u16::to_be_bytes(self.payload_length as u16)
-                .bytes()
-                .map(|b| blob.push(b.unwrap()));
-        } else {
-            second_byte |= 127;
-            blob.push(second_byte);
-            let _ = u64::to_be_bytes(self.payload_length as u64)
-                .bytes()
-                .map(|b| blob.push(b.unwrap()));
-        }
-
-        self.mask.and_then(|mask| {
-            let _ = mask.bytes().map(|b| blob.push(b.unwrap()));
-            Some(())
-        });
-
-        blob
-    }
-}
-
-fn read_frame(mut stream: &TcpStream) -> Frame {
-    let mut buffer = [0u8; 2];
-    stream
-        .read_exact(&mut buffer)
-        .expect("failed to read from stream");
-    let n = buffer[0];
-    let is_final = (n & 0x80) > 0;
-    let opcode = n & 0xf;
-    let n = buffer[1];
-    let mask = (n & 0x80) > 0;
-    let payload_len = n & 0x7f;
-
-    let real_len = if payload_len < 126 {
-        payload_len as usize
-    } else if payload_len == 126 {
-        stream
-            .read_exact(&mut buffer)
-            .expect("failed to read from stream");
-        u16::from_be_bytes(buffer) as usize
-    } else {
-        let mut buffer = [0u8; 8];
-        stream
-            .read_exact(&mut buffer)
-            .expect("failed to read from stream");
-        u64::from_be_bytes(buffer) as usize
-    };
-
-    let mut buffer = [0u8; 4];
-    if mask {
-        stream
-            .read_exact(&mut buffer)
-            .expect("failed to read from stream");
-    }
-
-    Frame {
-        is_final,
-        opcode: opcode.into(),
-        mask: if mask { Some(buffer) } else { None },
-        payload_length: real_len,
-    }
-}
 
 fn new_connection(listener: &TcpListener) -> Result<c_int, Error> {
     let mut ctx = sha1::Sha1Ctx::new();
@@ -299,8 +168,8 @@ impl<'a> Read for WsStream<'a> {
         let n = self.stream.read(buf)?;
         match self.frame.mask {
             Some(mask) => {
-                for c in 0..n {
-                    buf[self.cursor] = buf[c] ^ mask[self.cursor % 4];
+                for c in 0..n{
+                    buf[c] = buf[c] ^ mask[self.cursor % 4];
                     self.cursor += 1;
                 }
             }
