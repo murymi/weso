@@ -7,7 +7,7 @@ enum Sha1 {
 
 const SHA1_HASH_SIZE: usize = 20;
 
-struct Sha1Ctx {
+pub struct Sha1Ctx {
     intermediate_hash: [u32; SHA1_HASH_SIZE / 4],
     low_length: u32,
     high_length: u32,
@@ -24,7 +24,7 @@ macro_rules! sha1_circular_shift {
 }
 
 impl Sha1Ctx {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             low_length: 0,
             high_length: 0,
@@ -47,7 +47,7 @@ impl Sha1Ctx {
         }
     }
 
-    fn digest(&mut self, message: &str) -> [u8; SHA1_HASH_SIZE] {
+    pub fn digest(&mut self, message: &str) -> [u8; SHA1_HASH_SIZE] {
         self.input(message);
         self.result()
     }
@@ -218,22 +218,11 @@ impl Sha1Ctx {
     }
 }
 
-fn main() {
-    let mut ctx = Sha1Ctx::new();
 
-    ctx.digest("");
-    let out = ctx.result();
-
-    for b in out {
-        print!("{:X} ", b)
-    }
-
-    //println!("{:?}", out);
-}
 
 #[cfg(test)]
 mod tests {
-    use crate::Sha1Ctx;
+    use super::Sha1Ctx;
 
     #[test]
     fn shash() {

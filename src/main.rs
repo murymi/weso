@@ -1,100 +1,346 @@
-use std::{char, io::Bytes, mem, time::SystemTime};
+use std::{
+    ffi::c_int,
+    io::{BufRead, BufReader, Error, Read, Write},
+    mem,
+    net::{TcpListener, TcpStream},
+    os::fd::{AsRawFd, FromRawFd},
+    process::exit,
+};
 
-const ALPHABET: [u8; 64] = [
-    b'A', b'B', b'C', b'D', b'E', b'F', b'G', b'H', b'I', b'J', b'K', b'L', b'M', b'N', b'O', b'P',
-    b'Q', b'R', b'S', b'T', b'U', b'V', b'W', b'X', b'Y', b'Z', b'a', b'b', b'c', b'd', b'e', b'f',
-    b'g', b'h', b'i', b'j', b'k', b'l', b'm', b'n', b'o', b'p', b'q', b'r', b's', b't', b'u', b'v',
-    b'w', b'x', b'y', b'z', b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'+', b'/',
-];
+use mux::Mux;
 
-fn encode(input: &[u8], output: &mut [u8]) {
-    let l = input.len() - input.len() % 3;
-    let rem = input.len() - l;
-    let mut index = 0;
-    let mut out_index = 0;
-    loop {
-        let chunk = &input[index..index+3];
-        index += 3;
-        let char_1 = chunk[0];
-        let char_2 = chunk[1];
-        let char_3 = chunk[2];
-        let integer = u32::from_be_bytes([char_1, char_2, char_3, 0]);
-        for i in 0..4 {
-            let idx = (integer >> (26 - i * 6)) & 0x3f;
-            output[out_index] = ALPHABET[idx as usize];
-            out_index += 1;
-        }
-        if index == l {
-            break;
-        }
-    }
+mod base64;
+mod mux;
+mod sha1;
 
-    if rem == 2 {
-        output[out_index] = ALPHABET[(input[index] >> 2) as usize];
-        output[out_index + 1] = ALPHABET[((input[index] & 3) << 4 | (input[index+1] >> 4)) as usize];
-        output[out_index + 2] = ALPHABET[((input[index+1] & 0xf) << 2)as usize];
-        out_index += 3;
-    } else if rem == 1 {
-        output[out_index] = ALPHABET[(input[index] >> 2) as usize];
-        output[out_index + 1] = ALPHABET[((input[index] & 3) << 4) as usize];
-        out_index += 2;
-    }
-
-    if rem > 0 {
-        for _ in 0..(3 - rem) {
-            output[out_index] = b'=';
-            out_index += 1;
-        } 
-    }
-}
-
-fn decode(input: &str) -> String {
-    let mut lookup = [0u8; 256];
-    for (index, c) in ALPHABET.iter().enumerate() {
-        lookup[*c as usize] = index as u8;
-    }
-    let mut output = String::new();
-    let mut acc:u64 = 0;
-    let mut acc_len = 0;
-    for (_, c) in input.bytes().enumerate() {
-        if c == b'=' {
-            break;
-        }
-        acc = acc << 6 | ((lookup[c as usize] as u64) & 63);
-        acc_len += 1;
-        if acc_len == 8 {
-            for i in 0..6 {
-                output.push(((acc >> (40 - (8 * i))) & 255) as u8 as char);
-            }
-            acc_len = 0;
-        }
-    }
-
-    if acc_len > 0 {
-        let bits = acc_len * 6;
-        let bytes = bits/8;
-        acc >>= bits % 8; 
-        if bytes != 0 {
-            for i in 0..bytes {
-                output.push((acc >> (((bytes * 8) - 8) - (8 * i)) & 255) as u8 as char);
-            }
-        }
-    }
-
-    output
-}
+const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 fn main() {
-    //let mut output = [0u8; 1000];
-    //let start = SystemTime::now();
-    //encode("hello world".as_bytes(), &mut output);
-    //let time = start.elapsed().unwrap().as_nanos();
+    let listener = TcpListener::bind("127.0.0.1:3000").unwrap();
+    let mut mux = Mux::new();
+    mux.push_stream(listener.as_raw_fd());
 
-    let d = 127;
+    let server_fd = listener.as_raw_fd();
+    loop {
+        match mux.poll(-1) {
+            Ok(ready_fds) => {
+                for fd in ready_fds {
+                    if fd == server_fd {
+                        match new_connection(&listener) {
+                            Ok(stream) => mux.push_stream(stream),
+                            Err(e) => {
+                                panic!("{}", e);
+                            }
+                        }
+                    } else {
+                        let stream = unsafe { TcpStream::from_raw_fd(fd) };
+                        let frame = read_frame(&stream);
 
-    let message = "Zm9vYmFyZm9vYmFyZm9vYmFy";
+                        let mut reader = BufReader::new(WsStream::new(frame, stream));
 
-    let output = decode(&message);
+                        match frame.opcode {
+                            Opcode::Continuation => {}
+                            Opcode::Text => {
+                                let mut str = String::new();
+                                reader
+                                    .read_to_string(&mut str)
+                                    .expect("failed to read from reader");
+                            }
+                            Opcode::Binary => {
+                                let mut buf: Vec<u8> = vec![];
+                                reader.read_to_end(&mut buf).expect("failed to read to end");
+                            }
+                            Opcode::Reserved => {}
+                            Opcode::Close => {
+                                let mut buf = [0u8; 2];
+                                reader
+                                    .read_exact(&mut buf)
+                                    .expect("filed to read from reader");
+                                let status_code = u16::from_be_bytes(buf);
+                                let frame = Frame::new(true, Opcode::Close, None, 2);
+                                let mut stream =
+                                    WsStream::new(frame, unsafe { TcpStream::from_raw_fd(fd) });
+                                stream.write(&u16::to_be_bytes(status_code)).unwrap();
+                                mux.remove_pfd(fd);
+                            }
+                            Opcode::Ping => {
+                                let mut buf: Vec<u8> = vec![];
+                                let n =
+                                    reader.read_to_end(&mut buf).expect("failed to read to end");
+                                let pong = Frame::new(true, Opcode::Pong, None, n);
+                                let stream = unsafe { TcpStream::from_raw_fd(fd) };
+                                let mut stream = WsStream::new(frame, stream);
+                                stream.write(&buf[0..n]).unwrap();
+                                mem::forget(stream);
+                            }
+                            Opcode::Pong => {
+                                continue;
+                            }
+                        }
+                        exit(0)
+                    }
+                }
+            }
+            Err(e) => {
+                panic!("{:?}", e);
+            }
+        }
+    }
+}
 
-    println!("{} {}", output, output.len());
+#[derive(Debug, Copy, Clone)]
+enum Opcode {
+    Continuation,
+    Text,
+    Binary,
+    Reserved,
+    Close,
+    Ping,
+    Pong,
+}
+
+impl From<u8> for Opcode {
+    fn from(value: u8) -> Self {
+        match value {
+            0x0 => Self::Continuation,
+            0x1 => Self::Text,
+            0x2 => Self::Binary,
+            0x8 => Self::Close,
+            0x9 => Self::Ping,
+            0xa => Self::Pong,
+            _ => Self::Reserved,
+        }
+    }
+}
+
+impl Opcode {
+    fn into_u8(self) -> u8 {
+        match self {
+            Self::Continuation => 0x0,
+            Self::Text => 0x1,
+            Self::Binary => 0x2,
+            Self::Close => 0x8,
+            Self::Ping => 0x9,
+            Self::Pong => 0xa,
+            Self::Reserved => 0xb,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Frame {
+    is_final: bool,
+    opcode: Opcode,
+    mask: Option<[u8; 4]>,
+    payload_length: usize,
+}
+
+impl Frame {
+    fn new(is_final: bool, opcode: Opcode, mask: Option<[u8; 4]>, payload_length: usize) -> Self {
+        Self {
+            is_final,
+            opcode,
+            mask,
+            payload_length,
+        }
+    }
+
+    fn to_blob(&self) -> Vec<u8> {
+        let mut blob = vec![];
+        let mut first_byte = 0x0u8;
+        if self.is_final {
+            first_byte |= 0x80;
+        }
+        first_byte |= self.opcode.into_u8();
+        blob.push(first_byte);
+        let mut second_byte = 0x0u8;
+        if self.mask.is_some() {
+            second_byte |= 0x80;
+        }
+
+        if self.payload_length < 126 {
+            second_byte |= self.payload_length as u8;
+            blob.push(second_byte);
+        } else if self.payload_length <= u16::MAX as usize {
+            second_byte |= 126;
+            blob.push(second_byte);
+            let _ = u16::to_be_bytes(self.payload_length as u16)
+                .bytes()
+                .map(|b| blob.push(b.unwrap()));
+        } else {
+            second_byte |= 127;
+            blob.push(second_byte);
+            let _ = u64::to_be_bytes(self.payload_length as u64)
+                .bytes()
+                .map(|b| blob.push(b.unwrap()));
+        }
+
+        self.mask.and_then(|mask| {
+            let _ = mask.bytes().map(|b| blob.push(b.unwrap()));
+            Some(())
+        });
+
+        blob
+    }
+}
+
+fn read_frame(mut stream: &TcpStream) -> Frame {
+    let mut buffer = [0u8; 2];
+    stream
+        .read_exact(&mut buffer)
+        .expect("failed to read from stream");
+    let n = buffer[0];
+    let is_final = (n & 0x80) > 0;
+    let opcode = n & 0xf;
+    let n = buffer[1];
+    let mask = (n & 0x80) > 0;
+    let payload_len = n & 0x7f;
+
+    let real_len = if payload_len < 126 {
+        payload_len as usize
+    } else if payload_len == 126 {
+        stream
+            .read_exact(&mut buffer)
+            .expect("failed to read from stream");
+        u16::from_be_bytes(buffer) as usize
+    } else {
+        let mut buffer = [0u8; 8];
+        stream
+            .read_exact(&mut buffer)
+            .expect("failed to read from stream");
+        u64::from_be_bytes(buffer) as usize
+    };
+
+    let mut buffer = [0u8; 4];
+    if mask {
+        stream
+            .read_exact(&mut buffer)
+            .expect("failed to read from stream");
+    }
+
+    Frame {
+        is_final,
+        opcode: opcode.into(),
+        mask: if mask { Some(buffer) } else { None },
+        payload_length: real_len,
+    }
+}
+
+fn new_connection(listener: &TcpListener) -> Result<c_int, Error> {
+    let mut ctx = sha1::Sha1Ctx::new();
+    match listener.accept() {
+        Ok((mut stream, _)) => {
+            let mut key = get_key(&mut stream);
+            key.push_str(GUID);
+            let key = ctx.digest(&key);
+            let key = base64::encode(&key);
+            let accept = format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n", key);
+            println!(
+                "new connection from {:?} . key = {:?}",
+                stream.peer_addr(),
+                key
+            );
+            stream.write_all(accept.as_bytes()).unwrap();
+            let fd = stream.as_raw_fd();
+            mem::forget(stream);
+            Ok(fd)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn get_key(stream: &mut TcpStream) -> String {
+    let mut buffer = String::new();
+    let mut reader = BufReader::new(stream);
+    let mut key: Option<String> = None;
+    loop {
+        match reader.read_line(&mut buffer) {
+            Ok(size) => {
+                if size == 2 {
+                    break;
+                }
+                let fields = buffer.trim().split(": ").collect::<Vec<&str>>();
+                if fields[0] == "Sec-WebSocket-Key" {
+                    key = Some(fields[1].to_string());
+                }
+                buffer.clear();
+            }
+            Err(e) => {
+                panic!("{}", e)
+            }
+        }
+    }
+    key.unwrap()
+}
+
+struct WsStream {
+    frame: Frame,
+    stream: TcpStream,
+    buffer: Vec<u8>,
+    cursor: usize,
+}
+
+impl WsStream {
+    fn new(frame: Frame, stream: TcpStream) -> Self {
+        Self {
+            frame,
+            stream,
+            cursor: 0,
+            buffer: frame.to_blob(),
+        }
+    }
+}
+
+impl Read for WsStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.cursor == self.frame.payload_length {
+            return Ok(0);
+        }
+        let n = self.stream.read(buf)?;
+        match self.frame.mask {
+            Some(mask) => {
+                for c in 0..n {
+                    buf[self.cursor] = buf[c] ^ mask[self.cursor % 4];
+                    self.cursor += 1;
+                }
+            }
+            None => {}
+        }
+        Ok(n)
+    }
+}
+
+impl Write for WsStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.cursor + buf.len() > self.frame.payload_length {
+            return Err(Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "too long input",
+            ));
+        }
+        if self.cursor == 0 {
+            self.flush().unwrap()
+        }
+        match self.frame.mask {
+            Some(mask) => {
+                let _ = buf
+                    .bytes()
+                    .map(|b| self.buffer.push(b.unwrap() ^ mask[self.cursor % 4]));
+                self.flush().unwrap()
+            }
+            None => {
+                self.stream
+                    .write_all(buf)
+                    .expect("failed to write to stream");
+            }
+        }
+        self.cursor += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let result = self.stream.write_all(&self.buffer);
+        self.buffer.clear();
+        result
+    }
 }
