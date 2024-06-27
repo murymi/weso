@@ -1,89 +1,76 @@
 use std::{
-    ffi::c_int,
-    io::{stdout, BufRead, BufReader, Error, Read, Write},
-    mem,
-    net::{TcpListener, TcpStream},
-    os::fd::{AsRawFd, FromRawFd},
-    process::exit, thread::sleep, time::Duration,
+    io::{BufReader, Read},
+    net::TcpListener,
 };
 
-use frame::{Frame, Opcode};
+use frame::Opcode;
+use handshake::new_connection;
 use mux::Mux;
 
 mod base64;
+mod frame;
 mod mux;
 mod sha1;
-mod frame;
-
-const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+mod stream;
+mod handshake;
 
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:3000").unwrap();
-    let mut mux = Mux::new();
-    mux.push_stream(listener.as_raw_fd());
+    let mut mux = Mux::with_listener(listener);
 
-    let server_fd = listener.as_raw_fd();
+    //let server_fd = listener.as_raw_fd();
     loop {
         match mux.poll(-1) {
-            Ok(ready_fds) => {
-                for fd in ready_fds {
-                    if fd == server_fd {
-                        match new_connection(&listener) {
-                            Ok(stream) => mux.push_stream(stream),
-                            Err(e) => {
-                                panic!("{}", e);
-                            }
+            Ok(event) => {
+                match event {
+                    mux::Event::Join(listener) => match new_connection(&listener) {
+                        Ok(stream) => {
+                            mux.push_stream(stream);
                         }
-                    } else {
-                        let stream = unsafe { TcpStream::from_raw_fd(fd) };
-                        let frame = Frame::read_frame(&stream);
-                        let mut reader = BufReader::new(WsStream::new(frame, &stream));
-                        match frame.opcode {
-                            Opcode::Continuation => {
-                                println!("continue from: {:?}", stream.peer_addr());
-                                sleep(Duration::from_secs(60));
-                            }
-                            Opcode::Text => {
-                                println!("text from: {:?}", stream.peer_addr());
-                                let mut str = String::new();
-                                reader
-                                    .read_to_string(&mut str)
-                                    .expect("failed to read from reader");
-                            }
-                            Opcode::Binary => {
-                                println!("binary from: {:?}", stream.peer_addr());
-                                let mut buf: Vec<u8> = vec![];
-                                reader.read_to_end(&mut buf).expect("failed to read to end");
-                            }
-                            Opcode::Reserved => {}
-                            Opcode::Close => {
-                                println!("close from: {:?}", stream.peer_addr());
-                                let mut buf = [0u8; 2];
-                                reader
-                                    .read_exact(&mut buf);
-                                let status_code = u16::from_be_bytes(buf);
-                                let frame = Frame::new(true, Opcode::Close, None, 2);
-                                let mut wstream = WsStream::new(frame, &stream);
-                                wstream.write(&u16::to_be_bytes(status_code)).unwrap();
-                                mux.remove_pfd(fd);
-                                mem::drop(stream);
-                                continue;
-                            }
-                            Opcode::Ping => {
-                                println!("ping from: {:?}", stream.peer_addr());
-                                let mut buf: Vec<u8> = vec![];
-                                let n =
+                        Err(e) => {
+                            panic!("{}", e);
+                        }
+                    },
+                    mux::Event::Ready(ready_streams) => {
+                        for mut stream in ready_streams.into_iter() {
+                            //stream.read_frame();
+                            //let mut reader = BufReader::new(&mut stream);
+                            match stream.opcode() {
+                                Opcode::Continuation => {
+                                    println!("continue from: {:?}", stream.peer_addr());
+                                    //sleep(Duration::from_secs(60));
+                                }
+                                Opcode::Text => {
+                                    println!("text from: {:?}", stream.peer_addr());
+                                    let mut str = String::new();
+                                    let n = stream.read_to_string(&mut str).expect("failed to read");
+                                    println!("message:[{n}] {}", str);
+                                    if str == "kwenda senji" {
+                                        stream.text("nkwende nkwile ku", None).expect("failed to echo");
+                                    }
+                                }
+                                Opcode::Binary => {
+                                    println!("binary from: {:?}", stream.peer_addr());
+                                    let mut buf: Vec<u8> = vec![];
+                                    let mut reader = BufReader::new(&mut stream);
                                     reader.read_to_end(&mut buf).expect("failed to read to end");
-                                let pong = Frame::new(true, Opcode::Pong, None, n);
-                                let mut stream = WsStream::new(pong, &stream);
-                                stream.write(&buf[0..n]).unwrap();
-                            }
-                            Opcode::Pong => {
-                                continue;
+                                }
+                                Opcode::Reserved => {}
+                                Opcode::Close => {
+                                    println!("close from: {:?}", stream.peer_addr());
+                                    stream.bye(None).unwrap();
+                                    mux.remove(stream);
+                                    continue;
+                                }
+                                Opcode::Ping => {
+                                    println!("ping from: {:?}", stream.peer_addr());
+                                    stream.pong(None);
+                                }
+                                Opcode::Pong => {
+                                    continue;
+                                }
                             }
                         }
-
-                        mem::forget(stream);
                     }
                 }
             }
@@ -94,122 +81,3 @@ fn main() {
     }
 }
 
-
-fn new_connection(listener: &TcpListener) -> Result<c_int, Error> {
-    let mut ctx = sha1::Sha1Ctx::new();
-    match listener.accept() {
-        Ok((mut stream, _)) => {
-            let mut key = get_key(&mut stream);
-            key.push_str(GUID);
-            let key = ctx.digest(&key);
-            let key = base64::encode(&key);
-            let accept = format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n", key);
-            println!(
-                "new connection from {:?} . key = {:?}",
-                stream.peer_addr(),
-                key
-            );
-            stream.write_all(accept.as_bytes()).unwrap();
-            let fd = stream.as_raw_fd();
-            mem::forget(stream);
-            Ok(fd)
-        }
-        Err(e) => Err(e),
-    }
-}
-
-fn get_key(stream: &mut TcpStream) -> String {
-    let mut buffer = String::new();
-    let mut reader = BufReader::new(stream);
-    let mut key: Option<String> = None;
-    loop {
-        match reader.read_line(&mut buffer) {
-            Ok(size) => {
-                if size == 2 {
-                    break;
-                }
-                let fields = buffer.trim().split(": ").collect::<Vec<&str>>();
-                if fields[0] == "Sec-WebSocket-Key" {
-                    key = Some(fields[1].to_string());
-                }
-                buffer.clear();
-            }
-            Err(e) => {
-                panic!("{}", e)
-            }
-        }
-    }
-    key.unwrap()
-}
-
-struct WsStream<'a> {
-    frame: Frame,
-    stream: &'a TcpStream,
-    buffer: Vec<u8>,
-    cursor: usize,
-}
-
-impl<'a> WsStream<'a> {
-    fn new(frame: Frame, stream: &'a TcpStream) -> Self {
-        Self {
-            frame,
-            stream,
-            cursor: 0,
-            buffer: frame.to_blob(),
-        }
-    }
-}
-
-impl<'a> Read for WsStream<'a> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.cursor == self.frame.payload_length {
-            return Ok(0);
-        }
-        let n = self.stream.read(buf)?;
-        match self.frame.mask {
-            Some(mask) => {
-                for c in 0..n{
-                    buf[c] = buf[c] ^ mask[self.cursor % 4];
-                    self.cursor += 1;
-                }
-            }
-            None => {}
-        }
-        Ok(n)
-    }
-}
-
-impl<'a> Write for WsStream<'a> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if self.cursor + buf.len() > self.frame.payload_length {
-            return Err(Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "too long input",
-            ));
-        }
-        if self.cursor == 0 {
-            self.flush().unwrap()
-        }
-        match self.frame.mask {
-            Some(mask) => {
-                let _ = buf
-                    .bytes()
-                    .map(|b| self.buffer.push(b.unwrap() ^ mask[self.cursor % 4]));
-                self.flush().unwrap()
-            }
-            None => {
-                self.stream
-                    .write_all(buf)
-                    .expect("failed to write to stream");
-            }
-        }
-        self.cursor += buf.len();
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        let result = self.stream.write_all(&self.buffer);
-        self.buffer.clear();
-        result
-    }
-}

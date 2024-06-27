@@ -1,8 +1,9 @@
+//#[allow(unused_assignments)]
 enum Sha1 {
     Success,
     Null,
     InputTooLong,
-    StateError,
+    Stateerror,
 }
 
 const SHA1_HASH_SIZE: usize = 20;
@@ -31,7 +32,7 @@ impl Sha1Ctx {
             message_block_index: 0,
             computed: false,
             corrupted: false,
-            intermediate_hash: [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0],
+            intermediate_hash: [0x67452301, 0xeFcdAb89, 0x98bAdcFe, 0x10325476, 0xc3d2e1F0],
             message_block: [0; 64],
         }
     }
@@ -42,7 +43,7 @@ impl Sha1Ctx {
             message_block_index: 0,
             computed: false,
             corrupted: false,
-            intermediate_hash: [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0],
+            intermediate_hash: [0x67452301, 0xeFcdAb89, 0x98bAdcFe, 0x10325476, 0xc3d2e1F0],
             message_block: [0; 64],
         }
     }
@@ -131,9 +132,9 @@ impl Sha1Ctx {
     }
 
     fn process_block(&mut self) {
-        let k = [0x5A827999 as u32, 0x6ED9EBA1, 0x8F1BBCDC, 0xCA62C1D6];
+        let k = [0x5A827999 as u32, 0x6ed9ebA1, 0x8F1bbcdc, 0xcA62c1d6];
         let mut w = [0 as u32; 80];
-        //let (A, B, C, D, E): (u32, u32, u32, u32, u32);
+        //let (A, b, c, d, e): (u32, u32, u32, u32, u32);
 
         for t in 0..16 {
             w[t] = (self.message_block[t * 4] as u32) << 24;
@@ -146,7 +147,7 @@ impl Sha1Ctx {
             w[t] = sha1_circular_shift!(1, w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16]);
         }
 
-        let (mut A, mut B, mut C, mut D, mut E) = (
+        let (mut a, mut b, mut c, mut d, mut e) = (
             self.intermediate_hash[0],
             self.intermediate_hash[1],
             self.intermediate_hash[2],
@@ -157,62 +158,62 @@ impl Sha1Ctx {
         let mut temp = 0;
 
         for t in 0..20 {
-            temp = sha1_circular_shift!(5, A)
-                .wrapping_add(((B & C) | ((!B) & D)))
-                .wrapping_add(E)
+            temp = sha1_circular_shift!(5, a)
+                .wrapping_add((b & c) | ((!b) & d))
+                .wrapping_add(e)
                 .wrapping_add(w[t])
                 .wrapping_add(k[0]);
-            E = D;
-            D = C;
-            C = sha1_circular_shift!(30, B);
-            B = A;
-            A = temp;
+            e = d;
+            d = c;
+            c = sha1_circular_shift!(30, b);
+            b = a;
+            a = temp;
         }
 
         for t in 20..40 {
-            temp = sha1_circular_shift!(5, A)
-                .wrapping_add((B ^ C ^ D))
-                .wrapping_add(E)
+            temp = sha1_circular_shift!(5, a)
+                .wrapping_add(b ^ c ^ d)
+                .wrapping_add(e)
                 .wrapping_add(w[t])
                 .wrapping_add(k[1]);
-            E = D;
-            D = C;
-            C = sha1_circular_shift!(30, B);
-            B = A;
-            A = temp;
+            e = d;
+            d = c;
+            c = sha1_circular_shift!(30, b);
+            b = a;
+            a = temp;
         }
 
         for t in 40..60 {
-            temp = sha1_circular_shift!(5, A)
-                .wrapping_add(((B & C) | (B & D) | (C & D)))
-                .wrapping_add(E)
+            temp = sha1_circular_shift!(5, a)
+                .wrapping_add((b & c) | (b & d) | (c & d))
+                .wrapping_add(e)
                 .wrapping_add(w[t])
                 .wrapping_add(k[2]);
-            E = D;
-            D = C;
-            C = sha1_circular_shift!(30, B);
-            B = A;
-            A = temp;
+            e = d;
+            d = c;
+            c = sha1_circular_shift!(30, b);
+            b = a;
+            a = temp;
         }
 
         for t in 60..80 {
-            temp = sha1_circular_shift!(5, A)
-                .wrapping_add(B ^ C ^ D)
-                .wrapping_add(E)
+            temp = sha1_circular_shift!(5, a)
+                .wrapping_add(b ^ c ^ d)
+                .wrapping_add(e)
                 .wrapping_add(w[t])
                 .wrapping_add(k[3]);
-            E = D;
-            D = C;
-            C = sha1_circular_shift!(30, B);
-            B = A;
-            A = temp;
+            e = d;
+            d = c;
+            c = sha1_circular_shift!(30, b);
+            b = a;
+            a = temp;
         }
 
-        self.intermediate_hash[0] = self.intermediate_hash[0].wrapping_add(A);
-        self.intermediate_hash[1] = self.intermediate_hash[1].wrapping_add(B);
-        self.intermediate_hash[2] = self.intermediate_hash[2].wrapping_add(C);
-        self.intermediate_hash[3] = self.intermediate_hash[3].wrapping_add(D);
-        self.intermediate_hash[4] = self.intermediate_hash[4].wrapping_add(E);
+        self.intermediate_hash[0] = self.intermediate_hash[0].wrapping_add(a);
+        self.intermediate_hash[1] = self.intermediate_hash[1].wrapping_add(b);
+        self.intermediate_hash[2] = self.intermediate_hash[2].wrapping_add(c);
+        self.intermediate_hash[3] = self.intermediate_hash[3].wrapping_add(d);
+        self.intermediate_hash[4] = self.intermediate_hash[4].wrapping_add(e);
 
         self.message_block_index = 0;
     }
@@ -237,12 +238,12 @@ mod tests {
 
         let outputs = [
             [
-                0xA9u8, 0x99, 0x3E, 0x36, 0x47, 0x06, 0x81, 0x6A, 0xBA, 0x3E, 0x25, 0x71, 0x78,
-                0x50, 0xC2, 0x6C, 0x9C, 0xD0, 0xD8, 0x9D,
+                0xA9u8, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6A, 0xbA, 0x3e, 0x25, 0x71, 0x78,
+                0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
             ],
             [
-                0x84u8, 0x98, 0x3E, 0x44, 0x1C, 0x3B, 0xD2, 0x6E, 0xBA, 0xAE, 0x4A, 0xA1, 0xF9,
-                0x51, 0x29, 0xE5, 0xE5, 0x46, 0x70, 0xF1,
+                0x84u8, 0x98, 0x3e, 0x44, 0x1c, 0x3b, 0xd2, 0x6e, 0xbA, 0xAe, 0x4A, 0xA1, 0xF9,
+                0x51, 0x29, 0xe5, 0xe5, 0x46, 0x70, 0xF1,
             ],
             [
                 134u8, 247, 228, 55, 250, 165, 167, 252, 225, 93, 29, 220, 185, 234, 234, 234, 55,

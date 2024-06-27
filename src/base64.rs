@@ -1,6 +1,5 @@
-use std::{char, io::Bytes, mem, time::SystemTime};
 
-const ALPHABET: [u8; 64] = [
+pub const ALPHABET: [u8; 64] = [
     b'A', b'B', b'C', b'D', b'E', b'F', b'G', b'H', b'I', b'J', b'K', b'L', b'M', b'N', b'O', b'P',
     b'Q', b'R', b'S', b'T', b'U', b'V', b'W', b'X', b'Y', b'Z', b'a', b'b', b'c', b'd', b'e', b'f',
     b'g', b'h', b'i', b'j', b'k', b'l', b'm', b'n', b'o', b'p', b'q', b'r', b's', b't', b'u', b'v',
@@ -50,12 +49,12 @@ pub fn encode(input: &[u8]) -> String {
     output
 }
 
-pub fn decode(input: &str) -> String {
+pub fn decode(input: &str) -> Vec<u8> {
     let mut lookup = [0u8; 256];
     for (index, c) in ALPHABET.iter().enumerate() {
         lookup[*c as usize] = index as u8;
     }
-    let mut output = String::new();
+    let mut output = vec![];
     let mut acc:u64 = 0;
     let mut acc_len = 0;
     for (_, c) in input.bytes().enumerate() {
@@ -66,7 +65,7 @@ pub fn decode(input: &str) -> String {
         acc_len += 1;
         if acc_len == 8 {
             for i in 0..6 {
-                output.push(((acc >> (40 - (8 * i))) & 255) as u8 as char);
+                output.push(((acc >> (40 - (8 * i))) & 255) as u8);
             }
             acc_len = 0;
         }
@@ -78,7 +77,7 @@ pub fn decode(input: &str) -> String {
         acc >>= bits % 8; 
         if bytes != 0 {
             for i in 0..bytes {
-                output.push((acc >> (((bytes * 8) - 8) - (8 * i)) & 255) as u8 as char);
+                output.push((acc >> (((bytes * 8) - 8) - (8 * i)) & 255) as u8);
             }
         }
     }
@@ -86,17 +85,7 @@ pub fn decode(input: &str) -> String {
     output
 }
 
-fn main() {
-    //let mut output = [0u8; 1000];
-    //let start = SystemTime::now();
-    //encode("hello world".as_bytes(), &mut output);
-    //let time = start.elapsed().unwrap().as_nanos();
+#[cfg(test)]
+mod tests {
 
-    let d = 127;
-
-    let message = "Zm9vYmFyZm9vYmFyZm9vYmFy";
-
-    let output = decode(&message);
-
-    println!("{} {}", output, output.len());
 }

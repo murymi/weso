@@ -1,4 +1,7 @@
+//#[allow()]
 use std::{io::Read, net::TcpStream};
+
+pub const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 #[derive(Debug, Copy, Clone)]
 pub enum Opcode {
@@ -48,7 +51,12 @@ pub struct Frame {
 }
 
 impl Frame {
-    pub fn new(is_final: bool, opcode: Opcode, mask: Option<[u8; 4]>, payload_length: usize) -> Self {
+    pub fn new(
+        is_final: bool,
+        opcode: Opcode,
+        mask: Option<[u8; 4]>,
+        payload_length: usize,
+    ) -> Self {
         Self {
             is_final,
             opcode,
@@ -86,11 +94,14 @@ impl Frame {
                 .bytes()
                 .map(|b| blob.push(b.unwrap()));
         }
-
-        self.mask.and_then(|mask| {
-            let _ = mask.bytes().map(|b| blob.push(b.unwrap()));
-            Some(())
-        });
+        match self.mask {
+            Some(mask) => {
+                mask.bytes().for_each(|b| 
+                    blob.push(b.unwrap())
+                )
+            },
+            None => {},
+        }
 
         blob
     }
@@ -106,7 +117,7 @@ impl Frame {
         let n = buffer[1];
         let mask = (n & 0x80) > 0;
         let payload_len = n & 0x7f;
-    
+
         let real_len = if payload_len < 126 {
             payload_len as usize
         } else if payload_len == 126 {
@@ -121,14 +132,14 @@ impl Frame {
                 .expect("failed to read from stream");
             u64::from_be_bytes(buffer) as usize
         };
-    
+
         let mut buffer = [0u8; 4];
         if mask {
             stream
                 .read_exact(&mut buffer)
                 .expect("failed to read from stream");
         }
-    
+
         Self {
             is_final,
             opcode: opcode.into(),
@@ -137,4 +148,3 @@ impl Frame {
         }
     }
 }
-

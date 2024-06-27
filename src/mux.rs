@@ -1,11 +1,12 @@
 use std::{
     ffi::c_int,
-    io::stdin,
     net::{TcpListener, TcpStream},
-    os::fd::AsRawFd, thread::{sleep, spawn}, time::Duration,
+    os::fd::{AsRawFd, FromRawFd, IntoRawFd},
 };
 
-pub enum Event {
+use crate::stream::WsStream;
+
+pub enum Ev {
     POLLNVAL,
     POLLHUP,
     POLLERR,
@@ -24,15 +25,15 @@ pub enum PollErr {
     Other,
 }
 
-impl From<Event> for i16 {
-    fn from(value: Event) -> Self {
+impl From<Ev> for i16 {
+    fn from(value: Ev) -> Self {
         match value {
-            Event::POLLNVAL => 0x20,
-            Event::POLLHUP => 0x10,
-            Event::POLLERR => 0x8,
-            Event::POLLOUT => 0x4,
-            Event::POLLPRI => 0x2,
-            Event::POLLIN => 0x1,
+            Ev::POLLNVAL => 0x20,
+            Ev::POLLHUP => 0x10,
+            Ev::POLLERR => 0x8,
+            Ev::POLLOUT => 0x4,
+            Ev::POLLPRI => 0x2,
+            Ev::POLLIN => 0x1,
         }
     }
 }
@@ -48,29 +49,55 @@ extern "C" {
     fn poll(pfds: *const Pollfd, fdcount: usize, timeout: isize) -> isize;
 }
 
+pub enum Event<'a> {
+    Join(&'a mut TcpListener),
+    Ready(Vec<WsStream>),
+}
+
 pub struct Mux {
     pfds: Vec<Pollfd>,
+    //stream_map: HashMap<c_int, WsStream>,
+    listener: TcpListener,
 }
 
 impl Mux {
-    pub fn new() -> Self {
-        Self { pfds: Vec::new() }
+    //pub fn new() -> Self {
+    //    Self {
+    //        pfds: Vec::new(),
+    //        pfd_map: HashMap::new()
+    //    }
+    //}
+
+    pub fn with_listener(stream: TcpListener) -> Self {
+        Self {
+            pfds: vec![Pollfd {
+                fd: stream.as_raw_fd(),
+                events: Ev::POLLIN.into(),
+                revents: 0,
+            }],
+            //stream_map: HashMap::new(),
+            listener: stream,
+        }
     }
 
-    pub fn push_stream(&mut self, fd: c_int) {
+    pub fn push_stream(&mut self, stream: TcpStream) {
+        let fd = stream.into_raw_fd();
         self.add_pfd(Pollfd {
             fd,
-            events: Event::POLLIN.into(),
+            events: Ev::POLLIN.into(),
             revents: 0,
         });
+
+        //self.stream_map.insert(fd, WsStream::new(stream));
     }
 
     fn add_pfd(&mut self, pfd: Pollfd) {
         self.pfds.push(pfd);
     }
 
-    pub fn remove_pfd(&mut self, fd: c_int) {
+    pub fn remove(&mut self, fd: WsStream) {
         let mut index = 0;
+        let fd = fd.stream.as_raw_fd();
         for pfd in &self.pfds {
             if pfd.fd == fd {
                 break;
@@ -78,9 +105,11 @@ impl Mux {
             index += 1;
         }
         self.pfds.remove(index);
+        unsafe { TcpStream::from_raw_fd(fd) };
+        //self.stream_map.remove(&fd.as_raw_fd());
     }
 
-    pub fn poll(&self, timeout: isize) -> Result<Vec<c_int>, PollErr> {
+    pub fn poll(&mut self, timeout: isize) -> Result<Event, PollErr> {
         let events = unsafe { poll(self.pfds.as_ptr(), self.pfds.len(), timeout) };
         if events == 0 {
             Err(PollErr::TimedOut)
@@ -90,78 +119,21 @@ impl Mux {
             Err(PollErr::Other)
         } else {
             let mut ready = vec![];
-            for pfd in &self.pfds {
-                let events = pfd.revents ;
-                if events & (Event::POLLIN as i16) != 0 {
-                    ready.push(pfd.fd);
+            for (i, pfd) in self.pfds.iter().enumerate() {
+                let events = pfd.revents;
+                if i == 0 {
+                    if events & (Ev::POLLIN as i16) != 0 {
+                        return Ok(Event::Join(&mut (self.listener)));
+                    }
+                } else {
+                    if events & (Ev::POLLIN as i16) != 0 {
+                        let mut stream = WsStream::new(unsafe { TcpStream::from_raw_fd(pfd.fd) });
+                        stream.read_frame();
+                        ready.push(stream);
+                    }
                 }
             }
-            Ok(ready)
+            Ok(Event::Ready(ready))
         }
     }
 }
-
-// extern fn handler(sig: c_int) -> c_int {
-//     println!("==========signal received==========");
-//     //unsafe { raise(2) };
-//     0
-// }
-// 
-// fn main() {
-//     //let g = vec![];
-// 
-//     //let f = handler
-// 
-//     
-//     let mut mux = Mux::new();
-//     mux.add_pfd(Pollfd {
-//         fd: stdin().as_raw_fd(),
-//         events: Event::POLLIN.into(),
-//         revents: 0,
-//     });
-// 
-//     T
-//     
-//     let mut index = 0;
-//     
-//     spawn(|| { 
-//         sleep(Duration::from_secs(5));
-//         unsafe { raise(10) } 
-//     });
-//     //.join().expect("failed to join");
-//     
-//     unsafe{ signal(10, handler) };
-// 
-//     loop {
-//         //let events = unsafe { poll((&pfds).as_ptr(), 1, Duration::from_secs(3).as_millis() as u64) };
-//         println!("blocking");
-//         //mux.poll(-1);
-//         match mux.poll(1000) {
-//             Ok(r) => {
-//                 println!("ready {:?}", r);
-//             }
-//             Err(e) =>
-//             match e {
-//                 PollErr::Interupted => println!("interupted"),
-//                 PollErr::TimedOut => println!("timed out"),
-//                 PollErr::Other => panic!("== {:?} ==", e),
-//             },
-//         }
-//         //println!("ublcoked");
-// 
-//         //let duration = Duration::from_secs(3).as_secs();
-// 
-//         //if events < 0 {
-//         //    panic!("poll failed");
-//         //}
-// 
-//         //if events == TIMEOUT {
-//         //    println!("time out ");
-//         //    continue;
-//         //}
-// 
-//         //let mut buff = [0u8; 64];
-//         //stdin().read(&mut buff).unwrap();
-//     }
-// }
-// 
